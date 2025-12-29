@@ -97,9 +97,14 @@ class TradeQueue {
         reject,
       };
       
-      // Add to queue sorted by priority (higher priority first)
+      // Add to queue sorted by priority (higher priority first), then by time (FIFO)
       this.queue.push(trade);
-      this.queue.sort((a, b) => b.priority - a.priority);
+      this.queue.sort((a, b) => {
+        // First by priority (descending)
+        if (b.priority !== a.priority) return b.priority - a.priority;
+        // Then by addedAt (ascending - FIFO)
+        return a.addedAt - b.addedAt;
+      });
       
       // Mark symbol as pending
       this.pendingSymbols.add(symbol);

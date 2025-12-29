@@ -1,5 +1,5 @@
 import { DERIV_CONFIG, SymbolValue } from '@/config/deriv';
-import { derivWS, TickUpdate } from './deriv-websocket';
+import { derivWS, TickUpdate, ContractUpdate } from './deriv-websocket';
 import { calculateAllIndicators, IndicatorResult } from './indicators';
 import { tradeQueue, QueueStats } from './trade-queue';
 
@@ -20,10 +20,16 @@ export interface Trade {
   currentPrice: number;
   stake: number;
   profit: number;
-  status: 'open' | 'closed' | 'pending';
+  status: 'open' | 'closed' | 'pending' | 'closing';
   openTime: number;
   closeTime?: number;
   result?: 'win' | 'loss';
+  // Contract tracking
+  contractId?: string;
+  buyPrice?: number;
+  bidPrice?: number;
+  payout?: number;
+  unrealizedProfit?: number;
 }
 
 export interface TradingStats {
@@ -32,6 +38,8 @@ export interface TradingStats {
   losses: number;
   winRate: number;
   totalProfit: number;
+  realizedProfit: number;
+  unrealizedProfit: number;
   activeTradesCount: number;
   isPaused: boolean;
   pauseReason?: string;
@@ -62,6 +70,8 @@ class TradingEngine {
     losses: 0,
     winRate: 0,
     totalProfit: 0,
+    realizedProfit: 0,
+    unrealizedProfit: 0,
     activeTradesCount: 0,
     isPaused: false,
     queueSize: 0,
@@ -114,18 +124,63 @@ class TradingEngine {
     derivWS.onTick('*', this.handleTick.bind(this));
   }
 
-  public stop() {
+  public async stop() {
     if (!this.isRunning) return;
     
     this.isRunning = false;
-    this.log('info', 'Trading engine stopped');
+    this.log('info', 'Trading engine stopping - closing all positions...');
     
+    // Clear the trade queue first
+    tradeQueue.clearQueue();
+    
+    // Close all active trades
+    const activeTradesList = Array.from(this.activeTrades.values());
+    const openTrades = activeTradesList.filter(t => t.status === 'open' && t.contractId);
+    
+    if (openTrades.length > 0) {
+      this.log('info', `Closing ${openTrades.length} active position(s)...`);
+      
+      // Sell all contracts
+      const sellPromises = openTrades.map(async (trade) => {
+        if (trade.contractId && trade.status !== 'closing') {
+          trade.status = 'closing';
+          try {
+            const result = await derivWS.sellContract(trade.contractId, 0);
+            if (result.success) {
+              this.log('trade', `Sold contract ${trade.contractId}`, trade.symbol);
+            } else {
+              this.log('warning', `Failed to sell ${trade.contractId}: ${result.error}`, trade.symbol);
+            }
+          } catch (error) {
+            this.log('error', `Error selling contract: ${error}`, trade.symbol);
+          }
+        }
+      });
+      
+      // Wait for all sells to complete (with timeout)
+      await Promise.race([
+        Promise.all(sellPromises),
+        new Promise(resolve => setTimeout(resolve, 5000)), // 5 second timeout
+      ]);
+    }
+    
+    // Unsubscribe from all symbols
     Object.values(DERIV_CONFIG.SYMBOLS).forEach(symbol => {
       derivWS.unsubscribeTicks(symbol);
     });
     
-    // Clear the trade queue
-    tradeQueue.clearQueue();
+    // Clear any remaining trades
+    this.activeTrades.forEach((trade, id) => {
+      if (trade.status !== 'closed') {
+        trade.status = 'closed';
+        trade.closeTime = Date.now();
+        this.tradeJournal.push(trade);
+      }
+    });
+    this.activeTrades.clear();
+    
+    this.updateStats();
+    this.log('info', 'Trading engine stopped');
   }
 
   private handleTick(tick: TickUpdate) {
@@ -142,8 +197,13 @@ class TradingEngine {
     
     this.priceHistory.set(tick.symbol, history);
     
-    // Update active trades
-    this.updateActiveTrades(tick);
+    // Update active trades current price (for display only - actual P/L comes from contract)
+    this.activeTrades.forEach((trade) => {
+      if (trade.symbol === tick.symbol && trade.status === 'open') {
+        trade.currentPrice = tick.quote;
+        this.tradeHandlers.forEach(h => h(trade));
+      }
+    });
     
     // Analyze for signals (only if we have enough data)
     if (history.length >= 30) {
@@ -151,21 +211,54 @@ class TradingEngine {
     }
   }
 
-  private updateActiveTrades(tick: TickUpdate) {
-    this.activeTrades.forEach((trade, id) => {
-      if (trade.symbol === tick.symbol && trade.status === 'open') {
-        trade.currentPrice = tick.quote;
-        
-        // Calculate P/L
-        const priceDiff = tick.quote - trade.entryPrice;
-        const direction = trade.direction === 'LONG' ? 1 : -1;
-        trade.profit = priceDiff * direction * 100; // Simplified P/L calculation
-        
-        this.tradeHandlers.forEach(h => h(trade));
+  private handleContractUpdate(tradeId: string, update: ContractUpdate) {
+    const trade = this.activeTrades.get(tradeId);
+    if (!trade) return;
+    
+    // Update trade with contract data
+    trade.buyPrice = update.buyPrice;
+    trade.bidPrice = update.bidPrice;
+    trade.payout = update.payout;
+    trade.unrealizedProfit = update.profit;
+    trade.profit = update.profit; // Use real P/L from Deriv
+    
+    // Notify handlers of update
+    this.tradeHandlers.forEach(h => h(trade));
+    
+    // Check for take-profit condition
+    const takeProfitThreshold = trade.stake * DERIV_CONFIG.TAKE_PROFIT_PCT;
+    if (update.profit >= takeProfitThreshold && trade.status === 'open' && !update.isSold && !update.isExpired) {
+      this.log('ai', `Profit target hit (${update.profit.toFixed(2)}) - selling early`, trade.symbol);
+      trade.status = 'closing';
+      derivWS.sellContract(update.contractId, 0);
+    }
+    
+    // Check if contract is settled
+    if (update.isSettled || update.isSold || update.isExpired) {
+      const result: 'win' | 'loss' = update.profit >= 0 ? 'win' : 'loss';
+      const finalProfit = update.sellPrice ? update.sellPrice - update.buyPrice : update.profit;
+      
+      // Unsubscribe from contract updates
+      derivWS.unsubscribeOpenContract(update.contractId);
+      
+      // Close the trade with final P/L
+      this.closeTrade(tradeId, result, finalProfit);
+    }
+    
+    // Update unrealized P/L in stats
+    this.calculateUnrealizedProfit();
+    this.updateStats();
+  }
+
+  private calculateUnrealizedProfit() {
+    let unrealized = 0;
+    this.activeTrades.forEach(trade => {
+      if (trade.status === 'open' && trade.unrealizedProfit !== undefined) {
+        unrealized += trade.unrealizedProfit;
       }
     });
-    
-    this.updateStats();
+    this.stats.unrealizedProfit = unrealized;
+    this.stats.totalProfit = this.stats.realizedProfit + unrealized;
   }
 
   private analyzeSymbol(symbol: string, currentPrice: number) {
@@ -316,20 +409,35 @@ class TradingEngine {
     
     const contractType = signal.direction === 'LONG' ? 'CALL' : 'PUT';
     
+    // Calculate priority based on signal probability
+    const priority = signal.probability >= DERIV_CONFIG.HIGH_PRIORITY_THRESHOLD ? 2 : 1;
+    if (priority === 2) {
+      this.log('ai', `High probability signal (${(signal.probability * 100).toFixed(0)}%) - priority execution`, signal.symbol);
+    }
+    
     try {
-      // Use the trade queue instead of direct execution
+      // Use the trade queue with priority
       const result = await tradeQueue.addTrade(
         signal.symbol as SymbolValue,
         contractType,
         this.stake,
         5, // 5 ticks duration
-        't'
+        't',
+        priority
       );
       
-      if (result.success) {
+      if (result.success && result.contractId) {
         trade.status = 'open';
-        trade.entryPrice = this.priceHistory.get(signal.symbol)?.slice(-1)[0] || 0;
+        trade.contractId = result.contractId;
+        trade.entryPrice = result.buyPrice || this.priceHistory.get(signal.symbol)?.slice(-1)[0] || 0;
+        trade.buyPrice = result.buyPrice;
+        
         this.log('trade', `Trade opened: ${result.contractId}`, signal.symbol);
+        
+        // Subscribe to contract updates for realtime P/L
+        derivWS.subscribeOpenContract(result.contractId, (update) => {
+          this.handleContractUpdate(tradeId, update);
+        });
       } else {
         trade.status = 'closed';
         this.activeTrades.delete(tradeId);
@@ -373,6 +481,8 @@ class TradingEngine {
     
     // Update stats
     this.stats.totalTrades++;
+    this.stats.realizedProfit += profit;
+    
     if (result === 'win') {
       this.stats.wins++;
       this.log('trade', `WIN: +${profit.toFixed(2)} on ${trade.symbol}`, trade.symbol);
@@ -386,7 +496,9 @@ class TradingEngine {
       this.log('ai', `Tightening entry for ${trade.symbol} by 2%`, trade.symbol);
     }
     
-    this.stats.totalProfit += profit;
+    // Recalculate total profit
+    this.calculateUnrealizedProfit();
+    
     this.stats.winRate = this.stats.totalTrades > 0 
       ? this.stats.wins / this.stats.totalTrades 
       : 0;

@@ -12,6 +12,8 @@ export const DERIV_CONFIG: {
   STOP_LOSS_PERCENT: number;
   WIN_RATE_FLOOR: number;
   CALIBRATION_PAUSE_MS: number;
+  TAKE_PROFIT_PCT: number;
+  HIGH_PRIORITY_THRESHOLD: number;
   INDICATORS: {
     RSI_PERIOD: number;
     RSI_OVERBOUGHT: number;
@@ -39,6 +41,8 @@ export const DERIV_CONFIG: {
   STOP_LOSS_PERCENT: 0.05,
   WIN_RATE_FLOOR: 0.65,
   CALIBRATION_PAUSE_MS: 60000,
+  TAKE_PROFIT_PCT: 0.03, // 3% profit target to close trade early
+  HIGH_PRIORITY_THRESHOLD: 0.90, // Signals >= 90% get priority execution
   INDICATORS: {
     RSI_PERIOD: 14,
     RSI_OVERBOUGHT: 70,

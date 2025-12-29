@@ -11,8 +11,24 @@ export interface TickUpdate {
 export interface TradeResult {
   success: boolean;
   contractId?: string;
+  buyPrice?: number;
   error?: string;
   profit?: number;
+}
+
+export interface ContractUpdate {
+  contractId: string;
+  symbol: string;
+  buyPrice: number;
+  bidPrice: number;
+  profit: number;
+  payout: number;
+  isSold: boolean;
+  isExpired: boolean;
+  isSettled: boolean;
+  sellPrice?: number;
+  sellTime?: number;
+  status: 'open' | 'sold' | 'expired' | 'won' | 'lost';
 }
 
 export interface AccountInfo {
@@ -24,11 +40,13 @@ export interface AccountInfo {
 export type MessageHandler = (data: any) => void;
 export type TickHandler = (tick: TickUpdate) => void;
 export type StatusHandler = (status: ConnectionStatus) => void;
+export type ContractHandler = (update: ContractUpdate) => void;
 
 class DerivWebSocket {
   private ws: WebSocket | null = null;
   private messageHandlers: Map<string, MessageHandler[]> = new Map();
   private tickHandlers: Map<string, TickHandler[]> = new Map();
+  private contractHandlers: Map<string, ContractHandler[]> = new Map();
   private statusHandlers: StatusHandler[] = [];
   private status: ConnectionStatus = 'disconnected';
   private reconnectAttempts = 0;
@@ -36,6 +54,7 @@ class DerivWebSocket {
   private reconnectDelay = 1000;
   private pingInterval: NodeJS.Timeout | null = null;
   private subscriptions: Set<string> = new Set();
+  private contractSubscriptions: Map<string, string> = new Map(); // contractId -> subscriptionId
   
   // Dynamic currency from account
   private accountCurrency: string = 'USD';
@@ -167,6 +186,40 @@ class DerivWebSocket {
       globalHandlers.forEach(handler => handler(tick));
     }
 
+    // Handle proposal_open_contract updates (contract lifecycle)
+    if (data.proposal_open_contract) {
+      const poc = data.proposal_open_contract;
+      const contractId = String(poc.contract_id);
+      
+      // Store subscription ID for later unsubscription
+      if (data.subscription?.id) {
+        this.contractSubscriptions.set(contractId, data.subscription.id);
+      }
+      
+      const update: ContractUpdate = {
+        contractId,
+        symbol: poc.underlying || '',
+        buyPrice: poc.buy_price || 0,
+        bidPrice: poc.bid_price || 0,
+        profit: poc.profit || 0,
+        payout: poc.payout || 0,
+        isSold: poc.is_sold === 1,
+        isExpired: poc.is_expired === 1,
+        isSettled: poc.is_settleable === 1 || poc.is_sold === 1 || poc.is_expired === 1,
+        sellPrice: poc.sell_price,
+        sellTime: poc.sell_time,
+        status: this.determineContractStatus(poc),
+      };
+      
+      // Call handlers for this specific contract
+      const contractHandlers = this.contractHandlers.get(contractId) || [];
+      contractHandlers.forEach(handler => handler(update));
+      
+      // Call global contract handlers
+      const globalContractHandlers = this.contractHandlers.get('*') || [];
+      globalContractHandlers.forEach(handler => handler(update));
+    }
+
     // Handle errors
     if (data.error) {
       console.error('[WS] API Error:', data.error.message);
@@ -182,6 +235,14 @@ class DerivWebSocket {
       const globalHandlers = this.messageHandlers.get('*') || [];
       globalHandlers.forEach(handler => handler(data));
     }
+  }
+
+  private determineContractStatus(poc: any): ContractUpdate['status'] {
+    if (poc.is_sold === 1) return 'sold';
+    if (poc.is_expired === 1) {
+      return poc.profit >= 0 ? 'won' : 'lost';
+    }
+    return 'open';
   }
 
   private resubscribe() {
@@ -226,6 +287,85 @@ class DerivWebSocket {
         ticks: s,
         subscribe: 1,
       });
+    });
+  }
+
+  // Subscribe to contract updates for a specific contract
+  public subscribeOpenContract(contractId: string, handler: ContractHandler) {
+    // Register handler
+    const handlers = this.contractHandlers.get(contractId) || [];
+    handlers.push(handler);
+    this.contractHandlers.set(contractId, handlers);
+    
+    // Send subscription request
+    this.send({
+      proposal_open_contract: 1,
+      contract_id: contractId,
+      subscribe: 1,
+    });
+    
+    console.log(`[WS] Subscribed to contract updates: ${contractId}`);
+  }
+
+  // Unsubscribe from contract updates
+  public unsubscribeOpenContract(contractId: string) {
+    const subscriptionId = this.contractSubscriptions.get(contractId);
+    if (subscriptionId) {
+      this.send({
+        forget: subscriptionId,
+      });
+      this.contractSubscriptions.delete(contractId);
+    }
+    this.contractHandlers.delete(contractId);
+    console.log(`[WS] Unsubscribed from contract: ${contractId}`);
+  }
+
+  // Register global contract handler
+  public onContractUpdate(handler: ContractHandler) {
+    const handlers = this.contractHandlers.get('*') || [];
+    handlers.push(handler);
+    this.contractHandlers.set('*', handlers);
+  }
+
+  // Sell a contract at market price
+  public async sellContract(contractId: string, price: number = 0): Promise<TradeResult> {
+    return new Promise((resolve) => {
+      const reqId = Date.now();
+      
+      const handler = (data: any) => {
+        if (data.sell) {
+          resolve({
+            success: true,
+            contractId: String(data.sell.contract_id),
+            profit: data.sell.sold_for - (data.sell.buy_price || 0),
+          });
+        } else if (data.error) {
+          resolve({
+            success: false,
+            error: data.error.message,
+          });
+        }
+        // Remove handler after response
+        const handlers = this.messageHandlers.get('sell') || [];
+        const idx = handlers.indexOf(handler);
+        if (idx > -1) handlers.splice(idx, 1);
+      };
+
+      this.onMessage('sell', handler);
+
+      this.send({
+        sell: contractId,
+        price: price, // 0 = market price
+        req_id: reqId,
+      });
+
+      // Timeout after 10 seconds
+      setTimeout(() => {
+        resolve({
+          success: false,
+          error: 'Sell contract timeout',
+        });
+      }, 10000);
     });
   }
 
@@ -289,7 +429,8 @@ class DerivWebSocket {
         if (data.buy) {
           resolve({
             success: true,
-            contractId: data.buy.contract_id,
+            contractId: String(data.buy.contract_id),
+            buyPrice: data.buy.buy_price,
           });
         } else if (data.error) {
           resolve({

@@ -13,6 +13,8 @@ export function StatsHeader() {
     losses: 0,
     winRate: 0,
     totalProfit: 0,
+    realizedProfit: 0,
+    unrealizedProfit: 0,
     activeTradesCount: 0,
     isPaused: false,
     queueSize: 0,

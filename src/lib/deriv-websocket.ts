@@ -15,6 +15,12 @@ export interface TradeResult {
   profit?: number;
 }
 
+export interface AccountInfo {
+  currency: string;
+  balance: number;
+  loginid: string;
+}
+
 export type MessageHandler = (data: any) => void;
 export type TickHandler = (tick: TickUpdate) => void;
 export type StatusHandler = (status: ConnectionStatus) => void;
@@ -30,6 +36,10 @@ class DerivWebSocket {
   private reconnectDelay = 1000;
   private pingInterval: NodeJS.Timeout | null = null;
   private subscriptions: Set<string> = new Set();
+  
+  // Dynamic currency from account
+  private accountCurrency: string = 'USD';
+  private accountInfo: AccountInfo | null = null;
 
   constructor() {
     this.connect();
@@ -111,11 +121,34 @@ class DerivWebSocket {
   }
 
   private handleMessage(data: any) {
-    // Handle authorization
+    // Handle authorization - extract account currency
     if (data.authorize) {
       console.log('[WS] Authorized successfully');
+      
+      // Extract currency from authorize response
+      if (data.authorize.currency) {
+        this.accountCurrency = data.authorize.currency;
+        console.log(`[WS] Account currency detected: ${this.accountCurrency}`);
+      }
+      
+      this.accountInfo = {
+        currency: data.authorize.currency || 'USD',
+        balance: data.authorize.balance || 0,
+        loginid: data.authorize.loginid || '',
+      };
+      
       this.setStatus('authorized');
       this.resubscribe();
+      
+      // Also fetch settings for additional account info
+      this.send({ get_settings: 1 });
+    }
+    
+    // Handle get_settings response for currency fallback
+    if (data.get_settings) {
+      if (data.get_settings.preferred_language) {
+        console.log('[WS] Settings received');
+      }
     }
 
     // Handle ticks
@@ -233,6 +266,14 @@ class DerivWebSocket {
   public getStatus(): ConnectionStatus {
     return this.status;
   }
+  
+  public getAccountCurrency(): string {
+    return this.accountCurrency;
+  }
+  
+  public getAccountInfo(): AccountInfo | null {
+    return this.accountInfo;
+  }
 
   public async buyContract(
     symbol: SymbolValue,
@@ -261,6 +302,10 @@ class DerivWebSocket {
 
       this.onMessage('buy', handler);
 
+      // Use dynamic currency from account instead of hardcoded USD
+      const currency = this.accountCurrency;
+      console.log(`[WS] Executing buy with currency: ${currency}`);
+
       this.send({
         buy: 1,
         price: amount,
@@ -271,7 +316,7 @@ class DerivWebSocket {
           duration_unit: durationUnit,
           basis: 'stake',
           amount: amount,
-          currency: 'USD',
+          currency: currency, // Dynamic currency from account
         },
         req_id: reqId,
       });

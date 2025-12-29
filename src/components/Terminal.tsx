@@ -43,6 +43,8 @@ export function Terminal() {
         return 'text-loss';
       case 'ai':
         return 'text-accent';
+      case 'throttle':
+        return 'text-loss animate-pulse';
       default:
         return 'text-muted-foreground';
     }
@@ -60,6 +62,8 @@ export function Terminal() {
         return 'ERR';
       case 'ai':
         return 'AI ';
+      case 'throttle':
+        return 'THR';
       default:
         return 'INF';
     }

@@ -1,6 +1,7 @@
 import { DERIV_CONFIG, SymbolValue } from '@/config/deriv';
 import { derivWS, TickUpdate } from './deriv-websocket';
 import { calculateAllIndicators, IndicatorResult } from './indicators';
+import { tradeQueue, QueueStats } from './trade-queue';
 
 export interface TradeSignal {
   symbol: string;
@@ -34,11 +35,13 @@ export interface TradingStats {
   activeTradesCount: number;
   isPaused: boolean;
   pauseReason?: string;
+  queueSize: number;
+  isThrottled: boolean;
 }
 
 export interface LogEntry {
   timestamp: number;
-  type: 'info' | 'signal' | 'trade' | 'warning' | 'error' | 'ai';
+  type: 'info' | 'signal' | 'trade' | 'warning' | 'error' | 'ai' | 'throttle';
   symbol?: string;
   message: string;
   data?: any;
@@ -61,6 +64,8 @@ class TradingEngine {
     totalProfit: 0,
     activeTradesCount: 0,
     isPaused: false,
+    queueSize: 0,
+    isThrottled: false,
   };
   
   private logHandlers: LogHandler[] = [];
@@ -78,6 +83,18 @@ class TradingEngine {
     // Initialize price history for all symbols
     Object.values(DERIV_CONFIG.SYMBOLS).forEach(symbol => {
       this.priceHistory.set(symbol, []);
+    });
+    
+    // Register queue stats handler
+    tradeQueue.onStats((queueStats: QueueStats) => {
+      this.stats.queueSize = queueStats.queueSize;
+      this.stats.isThrottled = queueStats.isThrottled;
+      this.updateStats();
+    });
+    
+    // Register throttle message handler
+    tradeQueue.onThrottle((message: string) => {
+      this.log('throttle', `API THROTTLING: ${message}`);
     });
   }
 
@@ -106,6 +123,9 @@ class TradingEngine {
     Object.values(DERIV_CONFIG.SYMBOLS).forEach(symbol => {
       derivWS.unsubscribeTicks(symbol);
     });
+    
+    // Clear the trade queue
+    tradeQueue.clearQueue();
   }
 
   private handleTick(tick: TickUpdate) {
@@ -150,6 +170,12 @@ class TradingEngine {
 
   private analyzeSymbol(symbol: string, currentPrice: number) {
     if (this.stats.isPaused) return;
+    if (this.stats.isThrottled) return; // Don't generate signals while throttled
+    
+    // Check if symbol is on cooldown
+    if (tradeQueue.isInCooldown(symbol)) {
+      return; // Skip analysis for symbols on cooldown
+    }
     
     const history = this.priceHistory.get(symbol) || [];
     const indicators = calculateAllIndicators(history);
@@ -179,7 +205,7 @@ class TradingEngine {
       this.log('signal', reasoning, symbol, { probability: adjustedProbability, direction });
       this.signalHandlers.forEach(h => h(signal));
       
-      // Execute trade if conditions are met
+      // Execute trade through queue if conditions are met
       if (!this.activeTrades.has(`${symbol}_${direction}`)) {
         this.executeTrade(signal);
       }
@@ -284,13 +310,16 @@ class TradingEngine {
     };
     
     this.activeTrades.set(tradeId, trade);
-    this.log('trade', `Opening ${signal.direction} position on ${signal.symbol} @ ${this.stake} USD`, signal.symbol);
+    
+    const currency = derivWS.getAccountCurrency();
+    this.log('trade', `Queuing ${signal.direction} position on ${signal.symbol} @ ${this.stake} ${currency}`, signal.symbol);
     
     const contractType = signal.direction === 'LONG' ? 'CALL' : 'PUT';
     
     try {
-      const result = await derivWS.buyContract(
-        signal.symbol as any,
+      // Use the trade queue instead of direct execution
+      const result = await tradeQueue.addTrade(
+        signal.symbol as SymbolValue,
         contractType,
         this.stake,
         5, // 5 ticks duration
@@ -304,12 +333,27 @@ class TradingEngine {
       } else {
         trade.status = 'closed';
         this.activeTrades.delete(tradeId);
-        this.log('error', `Trade failed: ${result.error}`, signal.symbol);
+        
+        // Check for specific error types
+        const errorLower = (result.error || '').toLowerCase();
+        if (errorLower.includes('rate limit') || errorLower.includes('throttle') || errorLower.includes('too many')) {
+          this.log('throttle', `API THROTTLING: ${result.error}`, signal.symbol);
+        } else if (errorLower.includes('cooldown') || errorLower.includes('pending')) {
+          this.log('warning', `Signal filtered: ${result.error}`, signal.symbol);
+        } else {
+          this.log('error', `Trade failed: ${result.error}`, signal.symbol);
+        }
       }
     } catch (error) {
       trade.status = 'closed';
       this.activeTrades.delete(tradeId);
-      this.log('error', `Trade execution error: ${error}`, signal.symbol);
+      
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage.toLowerCase().includes('rate limit')) {
+        this.log('throttle', `API THROTTLING: ${errorMessage}`, signal.symbol);
+      } else {
+        this.log('error', `Trade execution error: ${errorMessage}`, signal.symbol);
+      }
     }
     
     this.updateStats();
@@ -331,10 +375,10 @@ class TradingEngine {
     this.stats.totalTrades++;
     if (result === 'win') {
       this.stats.wins++;
-      this.log('trade', `WIN: +${profit.toFixed(2)} USD on ${trade.symbol}`, trade.symbol);
+      this.log('trade', `WIN: +${profit.toFixed(2)} on ${trade.symbol}`, trade.symbol);
     } else {
       this.stats.losses++;
-      this.log('trade', `LOSS: ${profit.toFixed(2)} USD on ${trade.symbol}`, trade.symbol);
+      this.log('trade', `LOSS: ${profit.toFixed(2)} on ${trade.symbol}`, trade.symbol);
       
       // Adaptive learning - tighten requirements for losing symbol
       const currentAdj = this.symbolAdjustments.get(trade.symbol) || 0;
@@ -363,6 +407,9 @@ class TradingEngine {
     
     // Reset symbol adjustments
     this.symbolAdjustments.clear();
+    
+    // Clear the trade queue during calibration
+    tradeQueue.clearQueue();
     
     setTimeout(() => {
       this.stats.isPaused = false;
@@ -411,7 +458,8 @@ class TradingEngine {
 
   public setStake(stake: number) {
     this.stake = Math.max(DERIV_CONFIG.DEFAULT_STAKE, Math.min(DERIV_CONFIG.MAX_STAKE, stake));
-    this.log('info', `Stake updated to ${this.stake} USD`);
+    const currency = derivWS.getAccountCurrency();
+    this.log('info', `Stake updated to ${this.stake} ${currency}`);
   }
 
   public getActiveTrades(): Trade[] {

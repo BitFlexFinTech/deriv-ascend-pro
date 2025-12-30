@@ -80,15 +80,26 @@ export function StatsHeader() {
 
           {/* Stats */}
           <div className="flex items-center gap-6">
-            {/* Total P/L */}
+            {/* Realized P/L */}
             <div className="flex flex-col items-center">
-              <span className="text-xs text-muted-foreground uppercase tracking-wider">Total P/L</span>
+              <span className="text-xs text-muted-foreground uppercase tracking-wider">Realized</span>
               <div className={cn(
                 "flex items-center gap-1 font-mono text-lg font-bold",
-                stats.totalProfit >= 0 ? "text-profit" : "text-loss"
+                stats.realizedProfit >= 0 ? "text-profit" : "text-loss"
               )}>
-                {stats.totalProfit >= 0 ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />}
-                <span>{stats.totalProfit >= 0 ? '+' : ''}{stats.totalProfit.toFixed(2)} {accountCurrency}</span>
+                {stats.realizedProfit >= 0 ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />}
+                <span>{stats.realizedProfit >= 0 ? '+' : ''}{stats.realizedProfit.toFixed(2)} {accountCurrency}</span>
+              </div>
+            </div>
+
+            {/* Unrealized P/L */}
+            <div className="flex flex-col items-center">
+              <span className="text-xs text-muted-foreground uppercase tracking-wider">Unrealized</span>
+              <div className={cn(
+                "flex items-center gap-1 font-mono text-lg font-bold",
+                stats.unrealizedProfit >= 0 ? "text-profit/70" : "text-loss/70"
+              )}>
+                <span>{stats.unrealizedProfit >= 0 ? '+' : ''}{stats.unrealizedProfit.toFixed(2)} {accountCurrency}</span>
               </div>
             </div>
 

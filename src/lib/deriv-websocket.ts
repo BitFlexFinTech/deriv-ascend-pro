@@ -59,9 +59,22 @@ class DerivWebSocket {
   // Dynamic currency from account
   private accountCurrency: string = 'USD';
   private accountInfo: AccountInfo | null = null;
+  private currentApiToken: string = DERIV_CONFIG.API_TOKEN;
 
   constructor() {
     this.connect();
+  }
+
+  public setApiToken(token: string) {
+    this.currentApiToken = token;
+    console.log('[WS] API token updated, reconnecting...');
+    this.disconnect();
+    this.reconnectAttempts = 0;
+    this.connect();
+  }
+
+  public getApiToken(): string {
+    return this.currentApiToken;
   }
 
   private connect() {
@@ -103,9 +116,9 @@ class DerivWebSocket {
   }
 
   private authorize() {
-    if (DERIV_CONFIG.API_TOKEN) {
+    if (this.currentApiToken) {
       this.send({
-        authorize: DERIV_CONFIG.API_TOKEN,
+        authorize: this.currentApiToken,
       });
     }
   }

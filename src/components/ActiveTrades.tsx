@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
-import { TrendingUp, TrendingDown, Clock, Target } from 'lucide-react';
+import { TrendingUp, TrendingDown, Clock, Target, X, Loader2 } from 'lucide-react';
 import { tradingEngine, Trade } from '@/lib/trading-engine';
+import { derivWS } from '@/lib/deriv-websocket';
 import { cn } from '@/lib/utils';
+import { Button } from '@/components/ui/button';
+import { toast } from '@/hooks/use-toast';
 
 export function ActiveTrades() {
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -34,6 +37,42 @@ export function ActiveTrades() {
     if (seconds < 60) return `${seconds}s`;
     const minutes = Math.floor(seconds / 60);
     return `${minutes}m ${seconds % 60}s`;
+  };
+
+  const [closingTrades, setClosingTrades] = useState<Set<string>>(new Set());
+
+  const handleCloseTrade = async (trade: Trade) => {
+    if (!trade.contractId || trade.status !== 'open') return;
+    
+    setClosingTrades(prev => new Set(prev).add(trade.id));
+    
+    try {
+      const result = await derivWS.sellContract(trade.contractId, 0);
+      if (result.success) {
+        toast({
+          title: "Trade Closed",
+          description: `Closed ${trade.symbol} position`,
+        });
+      } else {
+        toast({
+          title: "Close Failed",
+          description: result.error || "Failed to close trade",
+          variant: "destructive",
+        });
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to close trade",
+        variant: "destructive",
+      });
+    } finally {
+      setClosingTrades(prev => {
+        const next = new Set(prev);
+        next.delete(trade.id);
+        return next;
+      });
+    }
   };
 
   if (trades.length === 0) {
@@ -71,20 +110,37 @@ export function ActiveTrades() {
               trade.direction === 'LONG' ? "border-profit/30" : "border-loss/30"
             )}
           >
-            {/* Direction Badge */}
-            <div className={cn(
-              "absolute top-2 right-2 px-2 py-0.5 rounded text-xs font-mono font-bold uppercase",
-              trade.direction === 'LONG' 
-                ? "bg-profit/20 text-profit" 
-                : "bg-loss/20 text-loss"
-            )}>
-              {trade.direction === 'LONG' ? (
-                <><TrendingUp className="h-3 w-3 inline mr-1" />LONG</>
-              ) : (
-                <><TrendingDown className="h-3 w-3 inline mr-1" />SHORT</>
+            {/* Direction Badge & Close Button */}
+            <div className="absolute top-2 right-2 flex items-center gap-2">
+              <div className={cn(
+                "px-2 py-0.5 rounded text-xs font-mono font-bold uppercase",
+                trade.direction === 'LONG' 
+                  ? "bg-profit/20 text-profit" 
+                  : "bg-loss/20 text-loss"
+              )}>
+                {trade.direction === 'LONG' ? (
+                  <><TrendingUp className="h-3 w-3 inline mr-1" />LONG</>
+                ) : (
+                  <><TrendingDown className="h-3 w-3 inline mr-1" />SHORT</>
+                )}
+              </div>
+              
+              {trade.status === 'open' && trade.contractId && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 w-6 p-0 text-muted-foreground hover:text-loss hover:bg-loss/20"
+                  onClick={() => handleCloseTrade(trade)}
+                  disabled={closingTrades.has(trade.id)}
+                >
+                  {closingTrades.has(trade.id) ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <X className="h-3 w-3" />
+                  )}
+                </Button>
               )}
             </div>
-
             <div className="flex items-center gap-3">
               <div>
                 <div className="font-mono text-sm font-medium text-foreground">

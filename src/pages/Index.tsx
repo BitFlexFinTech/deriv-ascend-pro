@@ -3,6 +3,7 @@ import { Terminal } from '@/components/Terminal';
 import { MarketScanner } from '@/components/MarketScanner';
 import { TradingControls } from '@/components/TradingControls';
 import { ActiveTrades } from '@/components/ActiveTrades';
+import { TradeHistory } from '@/components/TradeHistory';
 import { IntegrationsPanel } from '@/components/IntegrationsPanel';
 
 const Index = () => {
@@ -41,10 +42,13 @@ const Index = () => {
             </div>
           </div>
 
-          {/* Right Column - Active Trades & Integrations */}
+          {/* Right Column - Active Trades, History & Integrations */}
           <div className="space-y-6">
             {/* Active Trades */}
             <ActiveTrades />
+
+            {/* Trade History */}
+            <TradeHistory />
 
             {/* Integrations */}
             <IntegrationsPanel />

@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
-import { Play, Pause, Settings, RefreshCw, DollarSign, Shield, Zap, Target } from 'lucide-react';
+import { Play, Pause, Settings, RefreshCw, DollarSign, Shield, Target } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { tradingEngine, TradingStats } from '@/lib/trading-engine';
 import { DERIV_CONFIG } from '@/config/deriv';
 import { cn } from '@/lib/utils';
+import { ApiKeySettings } from './ApiKeySettings';
 
 export function TradingControls() {
   const [isRunning, setIsRunning] = useState(false);
@@ -92,6 +93,10 @@ export function TradingControls() {
             <Settings className="h-4 w-4 text-primary" />
             Risk Parameters
           </h3>
+          
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+            <ApiKeySettings />
+          </div>
           
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             {/* Stake Control */}

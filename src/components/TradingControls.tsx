@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Play, Pause, Settings, RefreshCw, DollarSign, Shield, Zap } from 'lucide-react';
+import { Play, Pause, Settings, RefreshCw, DollarSign, Shield, Zap, Target } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { tradingEngine, TradingStats } from '@/lib/trading-engine';
 import { DERIV_CONFIG } from '@/config/deriv';
@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils';
 export function TradingControls() {
   const [isRunning, setIsRunning] = useState(false);
   const [stake, setStake] = useState<number>(DERIV_CONFIG.DEFAULT_STAKE);
+  const [takeProfitPct, setTakeProfitPct] = useState<number>(DERIV_CONFIG.TAKE_PROFIT_PCT);
   const [stats, setStats] = useState<TradingStats | null>(null);
   const [showSettings, setShowSettings] = useState(false);
 
@@ -27,6 +28,11 @@ export function TradingControls() {
   const handleStakeChange = (value: number) => {
     setStake(value);
     tradingEngine.setStake(value);
+  };
+
+  const handleTakeProfitChange = (value: number) => {
+    setTakeProfitPct(value);
+    tradingEngine.setTakeProfitPct(value);
   };
 
   return (
@@ -110,14 +116,25 @@ export function TradingControls() {
               </div>
             </div>
 
-            {/* Min Probability */}
+            {/* Profit Target Control */}
             <div className="bg-secondary/50 rounded-lg p-3">
               <label className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
-                <Zap className="h-3 w-3" />
-                MIN PROBABILITY
+                <Target className="h-3 w-3" />
+                PROFIT TARGET
               </label>
-              <div className="font-mono text-lg font-bold text-primary">
-                {(DERIV_CONFIG.MIN_PROBABILITY * 100).toFixed(0)}%
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min={0.01}
+                  max={0.25}
+                  step={0.01}
+                  value={takeProfitPct}
+                  onChange={(e) => handleTakeProfitChange(parseFloat(e.target.value))}
+                  className="flex-1 accent-profit"
+                />
+                <span className="font-mono text-lg font-bold text-profit w-12 text-right">
+                  {(takeProfitPct * 100).toFixed(0)}%
+                </span>
               </div>
             </div>
 

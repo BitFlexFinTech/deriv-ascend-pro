@@ -85,6 +85,7 @@ class TradingEngine {
   
   private isRunning = false;
   private stake = DERIV_CONFIG.DEFAULT_STAKE;
+  private takeProfitPct = DERIV_CONFIG.TAKE_PROFIT_PCT;
   private symbolAdjustments: Map<string, number> = new Map();
   
   private readonly HISTORY_SIZE = 100;
@@ -226,7 +227,7 @@ class TradingEngine {
     this.tradeHandlers.forEach(h => h(trade));
     
     // Check for take-profit condition
-    const takeProfitThreshold = trade.stake * DERIV_CONFIG.TAKE_PROFIT_PCT;
+    const takeProfitThreshold = trade.stake * this.takeProfitPct;
     if (update.profit >= takeProfitThreshold && trade.status === 'open' && !update.isSold && !update.isExpired) {
       this.log('ai', `Profit target hit (${update.profit.toFixed(2)}) - selling early`, trade.symbol);
       trade.status = 'closing';
@@ -572,6 +573,15 @@ class TradingEngine {
     this.stake = Math.max(DERIV_CONFIG.DEFAULT_STAKE, Math.min(DERIV_CONFIG.MAX_STAKE, stake));
     const currency = derivWS.getAccountCurrency();
     this.log('info', `Stake updated to ${this.stake} ${currency}`);
+  }
+
+  public setTakeProfitPct(pct: number) {
+    this.takeProfitPct = Math.max(0.01, Math.min(0.50, pct)); // 1% to 50%
+    this.log('info', `Profit target updated to ${(this.takeProfitPct * 100).toFixed(0)}%`);
+  }
+
+  public getTakeProfitPct(): number {
+    return this.takeProfitPct;
   }
 
   public getActiveTrades(): Trade[] {
